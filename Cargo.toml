@@ -1,0 +1,10 @@
+[package]
+name = "stk500v2"
+version = "0.1.0"
+authors = ["David Ko <david@barobo.com>"]
+
+[dependencies]
+futures = "*"
+
+[dev-dependencies]
+serialport = "*"
