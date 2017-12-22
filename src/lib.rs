@@ -1,7 +1,10 @@
 extern crate futures;
+#[macro_use] extern crate log;
 
 use futures::Future;
 use futures::sync::oneshot;
+
+pub type Response = Box<Future<Item=Vec<u8>, Error=oneshot::Canceled>>;
 
 enum Commands {
         RespStkOk = 0x10,
@@ -112,6 +115,7 @@ unsafe impl Sync for Programmer {}
 
 impl Programmer {
     pub fn new() -> Programmer {
+        debug!("Programmer::new()");
         Programmer { 
             write_cb: None, 
             buffer: Vec::new() ,
@@ -128,18 +132,22 @@ impl Programmer {
     }
 
     pub fn deliver(&mut self, buf: Vec<u8>) {
+        debug!("deliver() received {} bytes", buf.len());
         self.buffer.extend(buf.iter());
+        debug!("Current deliver buffer size: {}", self.buffer.len());
         if self.buffer.len() < 2 {
-            // Buffer too small. Wait for more data.
+            debug!("Buffer too small. Wait for more data.");
             return;
         }
         if let Some(byte) = self.buffer.last() {
             if *byte != Commands::RespStkOk as u8 {
+                debug!("Sentinal byte not received. Waiting for more data...");
                 return;
             }
         }
         let byte = *self.buffer.first().unwrap();
         if byte != Commands::RespStkInsync as u8 {
+            debug!("Buffer header byte incorrect. Resetting internal buffer...");
             self.buffer.clear();
             return;
         }
@@ -149,43 +157,180 @@ impl Programmer {
             State::WaitResponse => {
                 let maybe_sender = self.waiting_future.take();
                 if let Some(sender) = maybe_sender {
-                    sender.send(buf).unwrap();
+                    sender.send(self.buffer.split_off(0)).unwrap();
                 }
                 self.state = State::Idle;
             }
         }
     }
 
-    fn send_command(&mut self, buf: &Vec<u8>) {
-        if let Some(ref cb) = self.write_cb {
-            let mut _buf = buf.clone();
-            _buf.push(Commands::SyncCrcEop as u8);
-            cb(_buf);
-        }
-    }
-
-    pub fn sign_on(&mut self) -> Box<Future<Item=Vec<u8>, Error=oneshot::Canceled>> {
+    fn send_command(&mut self, buf: &Vec<u8>) -> Response {
         self.state = State::WaitResponse;
         let (tx, rx) = oneshot::channel::<Vec<u8>>();
         self.waiting_future = Some(tx);
-        self.send_command(&vec![Commands::CmndStkGetSignOn as u8]);
-        return Box::new(rx);
+        if let Some(ref cb) = self.write_cb {
+            let mut _buf = buf.clone();
+            _buf.push(Commands::SyncCrcEop as u8);
+            debug!("Programmer::send_command: {} bytes.", _buf.len());
+            cb(_buf);
+        }
+        Box::new(rx)
     }
+
+    pub fn get_sync(&mut self) -> Response {
+        debug!("Programmer::sign_on()");
+        self.send_command(&vec![Commands::CmndStkGetSync as u8])
+    }
+
+    pub fn sign_on(&mut self) -> Response {
+        debug!("Programmer::sign_on()");
+        self.send_command(&vec![Commands::CmndStkGetSignOn as u8])
+    }
+
+    pub fn read_sign(&mut self) -> Response {
+        debug!("Programmer::read_sign()");
+        self.send_command(&vec![Commands::CmndStkReadSign as u8])
+    }
+
+    pub fn set_device(&mut self, settings: &Option<Vec<u8>>) -> Response {
+        let s = match *settings {
+            Some(ref buf) => buf.clone(),
+            None => vec![0x86, 0x00, 0x00, 0x01, 0x01, 0x01, 0x01,
+                0x03, 0xff, 0xff, 0xff, 0xff, 0x00, 0x80, 0x04, 0x00,
+                0x00, 0x00, 0x80, 0x00]
+        };
+        let mut command = vec![Commands::CmndStkSetDevice as u8];
+        command.extend(s);
+        self.send_command(&command)
+    }
+
+    pub fn set_device_ext(&mut self, settings: &Option<Vec<u8>>) -> Response {
+        let s = match *settings {
+            Some(ref buf) => buf.clone(),
+            None => vec![0x05, 0x04, 0xd7, 0xc2, 0x00]
+        };
+        let mut command = vec![Commands::CmndStkSetDevice as u8];
+        command.extend(s);
+        self.send_command(&command)
+    }
+
+    pub fn enter_prog_mode(&mut self) -> Response {
+        self.send_command(&vec![Commands::CmndStkEnterProgmode as u8])
+    }
+
+    pub fn load_address(&mut self, address: u16) -> Response {
+        let mut command = vec![Commands::CmndStkLoadAddress as u8];
+        command.push( (address & 0x00ff) as u8 );
+        command.push( (address>>8 & 0x00ff) as u8 );
+        self.send_command(&command)
+    }
+
+    pub fn prog_page(&mut self, data: &Vec<u8>) -> Response {
+        let mut command = vec![Commands::CmndStkProgPage as u8];
+        let size = data.len() as u16;
+        command.push( ((size>>8) & 0x00ff) as u8 );
+        command.push( (size & 0x00ff) as u8 );
+        command.push( 'F' as u8 );
+        command.extend(data);
+        self.send_command(&command)
+    }
+}
+
+pub enum StkError {
+    ParseHexFileError,
+}
+
+impl From<std::num::ParseIntError> for StkError {
+    fn from(_: std::num::ParseIntError) -> StkError {
+        StkError::ParseHexFileError
+    }
+}
+
+pub fn hex_to_buffer(hex_string: &String) -> Result<Vec<u8>, StkError> {
+    fn string_to_u32(s: Option<&str>) -> Result<u32, StkError> {
+        match s {
+            None => {
+                return Err(StkError::ParseHexFileError)
+            }
+            Some(digits) => {
+                let num = u32::from_str_radix(digits, 16)?;
+                Ok(num)
+            }
+        }
+    }
+
+    fn process_line(line: &str) -> Result<(u32, u32, u32), StkError>
+    {
+        // Returns byte_count, addr, and record_type
+        let byte_count = string_to_u32(line.get(1..3))?;
+        let addr = string_to_u32(line.get(3..7))?;
+        let record_type = string_to_u32(line.get(7..9))?;
+        Ok((byte_count, addr, record_type))
+    }
+    // Calculate the maximum size of the firmware file
+    let mut base_address = 0;
+    let mut size = 0;
+    for line in hex_string.lines() {
+        let (byte_count, addr, record_type) = process_line(line)?;
+        if record_type == 2 {
+            let ext = string_to_u32(line.get(9..((9+byte_count*2) as usize)))?;
+            base_address = ext*16;
+        } else if record_type == 4 {
+            let ext = string_to_u32(line.get(9..((9+byte_count*2) as usize)))?;
+            base_address = ext << 16;
+        } else if record_type == 0 {
+            let new_size = addr + base_address + byte_count;
+            if new_size > size {
+                size = new_size;
+            }
+        }
+    }
+
+    let mut buffer:Vec<u8> = vec![0xff; size as usize];
+
+    base_address = 0;
+    for line in hex_string.lines() {
+        let (byte_count, addr, record_type) = process_line(line)?;
+        if record_type == 2 {
+            let ext = string_to_u32(line.get(9..((9+byte_count*2) as usize)))?;
+            base_address = ext*16;
+        } else if record_type == 4 {
+            let ext = string_to_u32(line.get(9..((9+byte_count*2) as usize)))?;
+            base_address = ext << 16;
+        } else if record_type == 0 {
+            let _addr = addr + base_address;
+            for i in 0..byte_count {
+                let b = string_to_u32(line.get( ((9+i*2) as usize) .. ((11+(i*2)) as usize)))?;
+                buffer[(_addr + i) as usize] = b as u8;
+            }
+        }
+    }
+
+    Ok(buffer)
 }
 
 #[cfg(test)]
 mod tests {
     extern crate serialport;
+    extern crate simple_logger;
     use self::serialport::prelude::*;
     use super::Programmer;
     use std::thread;
     use std::sync::{Arc, Mutex};
     use std::time::Duration;
+    use std::rc::Rc;
+    use std::cell::RefCell;
+
     use futures::Future;
+    use futures::sync::oneshot;
     #[test]
     fn it_works() {
+        simple_logger::init().unwrap();
         let programmer = Arc::new(Mutex::new(Programmer::new()));
         let _programmer = programmer.clone();
+
+        let (tx, rx) = oneshot::channel::<()>();
+
         thread::spawn(move || {
             let s = serialport::SerialPortSettings {
                 baud_rate: BaudRate::Baud57600,
@@ -195,19 +340,59 @@ mod tests {
                 stop_bits: StopBits::One,
                 timeout: Duration::from_millis(1),
             };
-            let mut port = serialport::open_with_settings("/dev/ttyACM0", &s).unwrap();
+            let mut _port_inner = serialport::open_with_settings("/dev/ttyACM0", &s).unwrap();
             let mut buffer = [0; 256];
+            let mut port = Arc::new(Mutex::new(_port_inner));
+
+            // Set the write-callback
+            {
+                let mut p = _programmer.lock().unwrap();
+                let _port = port.clone();
+                p.set_write_cb(move |bytes| {
+                    debug!("Sending bytes to underlying serial port...");
+                    _port.lock().unwrap().write(bytes.as_slice());
+                    debug!("Sending bytes to underlying serial port...done");
+                });
+            }
+
+            tx.send(());
 
             loop {
-                if let Ok(len) = port.read(&mut buffer) {
+                let maybe_len = {
+                    port.lock().unwrap().read(&mut buffer)
+                };
+                if let Ok(len) = maybe_len {
+                    debug!("Received {} bytes from serial port. Delivering...", len);
                     _programmer.lock().unwrap().deliver( buffer[0..len].to_vec() );
+                    debug!("Received {} bytes from serial port. Delivering...done", len);
+                } else {
+                    thread::sleep( Duration::from_millis(1) );
                 }
             }
         });
 
+        rx.wait().unwrap();
+        
+        let f = {
+            programmer.lock().unwrap().get_sync()
+        };
+        if let Ok(bytes) = f.wait() {
+            println!("Got response from get_sync()... {} bytes", bytes.len());
+        }
+
         let f = {
             programmer.lock().unwrap().sign_on()
         };
-        f.wait();
+        if let Ok(bytes) = f.wait() {
+            println!("Got response from sign_on()... {} bytes", bytes.len());
+        }
+
+        let f = {
+            programmer.lock().unwrap().read_sign()
+        };
+        if let Ok(bytes) = f.wait() {
+            println!("Got response from read_sign()... {} bytes", bytes.len());
+        }
+
     }
 }

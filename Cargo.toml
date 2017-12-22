@@ -5,6 +5,8 @@ authors = ["David Ko <david@barobo.com>"]
 
 [dependencies]
 futures = "*"
+log = "*"
 
 [dev-dependencies]
 serialport = "*"
+simple_logger = "*"
