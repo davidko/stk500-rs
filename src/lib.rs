@@ -2,7 +2,11 @@ extern crate futures;
 #[macro_use] extern crate log;
 
 use futures::Future;
+use futures::future::{loop_fn, Loop};
 use futures::sync::oneshot;
+
+use std::rc::Rc;
+use std::cell::RefCell;
 
 pub type Response = Box<Future<Item=Vec<u8>, Error=oneshot::Canceled>>;
 
@@ -104,10 +108,7 @@ enum State {
 }
 
 struct Programmer {
-    write_cb: Option< Box<Fn(Vec<u8>)> >, // Function which writes to the microcontroller being programmed
-    buffer: Vec<u8>,
-    state: State,
-    waiting_future: Option<oneshot::Sender<Vec<u8>>>,
+    inner: Rc<RefCell<Inner>>
 }
 
 unsafe impl Send for Programmer {}
@@ -115,8 +116,124 @@ unsafe impl Sync for Programmer {}
 
 impl Programmer {
     pub fn new() -> Programmer {
-        debug!("Programmer::new()");
         Programmer { 
+            inner: Rc::new(RefCell::new(Inner::new()))
+        }
+    }
+
+	pub fn set_write_cb<F>(&mut self, callback: F) 
+        where F: Fn(Vec<u8>),
+              F: 'static
+    {
+        self.inner.borrow_mut().set_write_cb(callback)
+    }
+
+    pub fn deliver(&mut self, buf: Vec<u8>) {
+        self.inner.borrow_mut().deliver(buf)
+    }
+
+    pub fn get_sync(&mut self) -> Response {
+        debug!("Programmer::sign_on()");
+        self.inner.borrow_mut().get_sync()
+    }
+
+    pub fn sign_on(&mut self) -> Response {
+        debug!("Programmer::sign_on()");
+        self.inner.borrow_mut().sign_on()
+    }
+
+    pub fn read_sign(&mut self) -> Response {
+        debug!("Programmer::read_sign()");
+        self.inner.borrow_mut().read_sign()
+    }
+
+    pub fn set_device(&mut self, settings: &Option<Vec<u8>>) -> Response {
+        self.inner.borrow_mut().set_device(settings)
+    }
+
+    pub fn set_device_ext(&mut self, settings: &Option<Vec<u8>>) -> Response {
+        self.inner.borrow_mut().set_device_ext(settings)
+    }
+
+    pub fn enter_prog_mode(&mut self) -> Response {
+        self.inner.borrow_mut().enter_prog_mode()
+    }
+
+    pub fn load_address(&mut self, address: u16) -> Response {
+        self.inner.borrow_mut().load_address(address)
+    }
+
+    pub fn prog_page(&mut self, data: &Vec<u8>) -> Response {
+        self.inner.borrow_mut().prog_page(data)
+    }
+
+    pub fn prog_flash<'a>(&'a mut self, page_size: usize, word_size: usize, data: &Vec<u8>) -> 
+        Box< Future<Item=Vec<u8>, Error=oneshot::Canceled> + 'a>
+    {
+        let p = self.inner.clone();
+        let p2 = self.inner.clone();
+        let p3 = self.inner.clone();
+        let p4 = self.inner.clone();
+        let p5 = self.inner.clone();
+        let p6 = self.inner.clone();
+        let p7 = self.inner.clone();
+        let p8 = self.inner.clone();
+        let f = p.borrow_mut().get_sync().and_then(move |_| {
+            let mut inner = p2.borrow_mut();
+            inner.set_device(&None)
+        }).and_then(move |_| {
+            let mut inner = p3.borrow_mut();
+            inner.set_device_ext(&None)
+        }).and_then(move |_| {
+            let mut inner = p4.borrow_mut();
+            inner.enter_prog_mode()
+        }).and_then(move |_| {
+            let mut inner = p5.borrow_mut();
+            inner.read_sign()
+        }).and_then(move |_| {
+            fn check_program(buf: &Vec<u8>) -> bool {
+                buf.iter().any(|&x| {
+                    x != 0xff
+                })
+            }
+            
+            loop_fn(0 as usize, move |index| {
+                let end = index + page_size;
+                let ref page = data[index..end];
+                if check_program(&page.to_vec()) {
+                    let mut inner = p6.borrow_mut();
+                    return inner.load_address((index / word_size) as u16).and_then(move |_| {
+                        let mut inner = p7.borrow_mut();
+                        inner.prog_page(&page.to_vec())
+                    }).and_then(|_| {
+                        if index < data.len() {
+                            Ok(Loop::Continue(end))
+                        } else {
+                            Ok(Loop::Break(end))
+                        }
+                    })
+                } 
+                return Ok(Loop::Continue(end));
+            });
+        }).and_then(move |_| {
+            let mut inner = p8.borrow_mut();
+            inner.leave_prog_mode()
+        });
+        Box::new(f)
+    }
+}
+
+struct Inner {
+    write_cb: Option< Box<Fn(Vec<u8>)> >, // Function which writes to the microcontroller being programmed
+    buffer: Vec<u8>,
+    state: State,
+    waiting_future: Option<oneshot::Sender<Vec<u8>>>,
+}
+
+impl Inner {
+    pub fn new() -> Inner {
+        debug!("Programmer::new()");
+        Inner { 
             write_cb: None, 
             buffer: Vec::new() ,
             state: State::Idle,
@@ -209,7 +326,7 @@ impl Programmer {
             Some(ref buf) => buf.clone(),
             None => vec![0x05, 0x04, 0xd7, 0xc2, 0x00]
         };
-        let mut command = vec![Commands::CmndStkSetDevice as u8];
+        let mut command = vec![Commands::CmndStkSetDeviceExt as u8];
         command.extend(s);
         self.send_command(&command)
     }
