@@ -5,12 +5,11 @@ use futures::Future;
 use futures::future::{loop_fn, Loop};
 use futures::sync::oneshot;
 
-use std::rc::Rc;
-use std::cell::RefCell;
+use std::sync::{Arc, Mutex};
 
 pub type Response = Box<Future<Item=Vec<u8>, Error=oneshot::Canceled>>;
 
-enum Commands {
+pub enum Commands {
         RespStkOk = 0x10,
         RespStkFailed = 0x11,
         RespStkUnknown = 0x12,
@@ -84,7 +83,7 @@ enum Commands {
         ParmStkSelftimed = 0x96,
 }
 
-enum StkStatus {
+pub enum StkStatus {
 
 
 //# *****************[ STK status bit definitions ]***************************
@@ -107,8 +106,8 @@ enum State {
     WaitResponse,
 }
 
-struct Programmer {
-    inner: Rc<RefCell<Inner>>
+pub struct Programmer {
+    inner: Arc<Mutex<Inner>>
 }
 
 unsafe impl Send for Programmer {}
@@ -117,7 +116,7 @@ unsafe impl Sync for Programmer {}
 impl Programmer {
     pub fn new() -> Programmer {
         Programmer { 
-            inner: Rc::new(RefCell::new(Inner::new()))
+            inner: Arc::new(Mutex::new(Inner::new()))
         }
     }
 
@@ -125,50 +124,50 @@ impl Programmer {
         where F: Fn(Vec<u8>),
               F: 'static
     {
-        self.inner.borrow_mut().set_write_cb(callback)
+        self.inner.lock().unwrap().set_write_cb(callback)
     }
 
     pub fn deliver(&mut self, buf: Vec<u8>) {
-        self.inner.borrow_mut().deliver(buf)
+        self.inner.lock().unwrap().deliver(buf)
     }
 
     pub fn get_sync(&mut self) -> Response {
         debug!("Programmer::sign_on()");
-        self.inner.borrow_mut().get_sync()
+        self.inner.lock().unwrap().get_sync()
     }
 
     pub fn sign_on(&mut self) -> Response {
         debug!("Programmer::sign_on()");
-        self.inner.borrow_mut().sign_on()
+        self.inner.lock().unwrap().sign_on()
     }
 
     pub fn read_sign(&mut self) -> Response {
         debug!("Programmer::read_sign()");
-        self.inner.borrow_mut().read_sign()
+        self.inner.lock().unwrap().read_sign()
     }
 
     pub fn set_device(&mut self, settings: &Option<Vec<u8>>) -> Response {
-        self.inner.borrow_mut().set_device(settings)
+        self.inner.lock().unwrap().set_device(settings)
     }
 
     pub fn set_device_ext(&mut self, settings: &Option<Vec<u8>>) -> Response {
-        self.inner.borrow_mut().set_device_ext(settings)
+        self.inner.lock().unwrap().set_device_ext(settings)
     }
 
     pub fn enter_prog_mode(&mut self) -> Response {
-        self.inner.borrow_mut().enter_prog_mode()
+        self.inner.lock().unwrap().enter_prog_mode()
     }
 
     pub fn load_address(&mut self, address: u16) -> Response {
-        self.inner.borrow_mut().load_address(address)
+        self.inner.lock().unwrap().load_address(address)
     }
 
     pub fn prog_page(&mut self, data: &Vec<u8>) -> Response {
-        self.inner.borrow_mut().prog_page(data)
+        self.inner.lock().unwrap().prog_page(data)
     }
 
-    pub fn prog_flash<'a>(&'a mut self, page_size: usize, word_size: usize, data: &Vec<u8>) -> 
-        Box< Future<Item=Vec<u8>, Error=oneshot::Canceled> + 'a>
+    pub fn prog_flash<'a>(&'a mut self, page_size: usize, word_size: usize, data: Vec<u8>) -> 
+        Box< Future<Item=Vec<u8>, Error=oneshot::Canceled> >
     {
         let p = self.inner.clone();
         let p2 = self.inner.clone();
@@ -178,17 +177,17 @@ impl Programmer {
         let p6 = self.inner.clone();
         let p7 = self.inner.clone();
         let p8 = self.inner.clone();
-        let f = p.borrow_mut().get_sync().and_then(move |_| {
-            let mut inner = p2.borrow_mut();
+        let f = p.lock().unwrap().get_sync().and_then(move |_| {
+            let mut inner = p2.lock().unwrap();
             inner.set_device(&None)
         }).and_then(move |_| {
-            let mut inner = p3.borrow_mut();
+            let mut inner = p3.lock().unwrap();
             inner.set_device_ext(&None)
         }).and_then(move |_| {
-            let mut inner = p4.borrow_mut();
+            let mut inner = p4.lock().unwrap();
             inner.enter_prog_mode()
         }).and_then(move |_| {
-            let mut inner = p5.borrow_mut();
+            let mut inner = p5.lock().unwrap();
             inner.read_sign()
         }).and_then(move |_| {
             fn check_program(buf: &Vec<u8>) -> bool {
@@ -197,26 +196,35 @@ impl Programmer {
                 })
             }
             
-            loop_fn(0 as usize, move |index| {
-                let end = index + page_size;
-                let ref page = data[index..end];
-                if check_program(&page.to_vec()) {
-                    let mut inner = p6.borrow_mut();
-                    return inner.load_address((index / word_size) as u16).and_then(move |_| {
-                        let mut inner = p7.borrow_mut();
-                        inner.prog_page(&page.to_vec())
-                    }).and_then(|_| {
-                        if index < data.len() {
-                            Ok(Loop::Continue(end))
-                        } else {
-                            Ok(Loop::Break(end))
-                        }
-                    })
-                } 
-                return Ok(Loop::Continue(end));
-            });
+            loop_fn(0 as usize, move |mut index| {
+                let mut end = index + page_size;
+                if end >= data.len() {
+                    end = data.len();
+                }
+                let mut page = &data[index..end];
+                let _data = data.clone();
+                let __data = data.clone();
+                while check_program(&page.to_vec()) == false {
+                    index = end;
+                    end = index + page_size;
+                    page = &data[index..end];
+                }
+                let mut inner = p6.lock().unwrap();
+                let p7 = p7.clone();
+                inner.load_address((index / word_size) as u16).and_then(move |_| {
+                    let mut inner = p7.lock().unwrap();
+                    let ref page = _data[index..end];
+                    inner.prog_page(&page.to_vec())
+                }).and_then(move |_| {
+                    if end < __data.len() {
+                        Ok(Loop::Continue(end))
+                    } else {
+                        Ok(Loop::Break(end))
+                    }
+                })
+            })
         }).and_then(move |_| {
-            let mut inner = p8.borrow_mut();
+            let mut inner = p8.lock().unwrap();
             inner.leave_prog_mode()
         });
         Box::new(f)
@@ -310,6 +318,7 @@ impl Inner {
     }
 
     pub fn set_device(&mut self, settings: &Option<Vec<u8>>) -> Response {
+        debug!("Programmer::set_device()");
         let s = match *settings {
             Some(ref buf) => buf.clone(),
             None => vec![0x86, 0x00, 0x00, 0x01, 0x01, 0x01, 0x01,
@@ -322,6 +331,7 @@ impl Inner {
     }
 
     pub fn set_device_ext(&mut self, settings: &Option<Vec<u8>>) -> Response {
+        debug!("Programmer::set_device_ext()");
         let s = match *settings {
             Some(ref buf) => buf.clone(),
             None => vec![0x05, 0x04, 0xd7, 0xc2, 0x00]
@@ -332,10 +342,12 @@ impl Inner {
     }
 
     pub fn enter_prog_mode(&mut self) -> Response {
+        debug!("Programmer::enter_prog_mode()");
         self.send_command(&vec![Commands::CmndStkEnterProgmode as u8])
     }
 
     pub fn load_address(&mut self, address: u16) -> Response {
+        debug!("Programmer::load_address()");
         let mut command = vec![Commands::CmndStkLoadAddress as u8];
         command.push( (address & 0x00ff) as u8 );
         command.push( (address>>8 & 0x00ff) as u8 );
@@ -343,6 +355,7 @@ impl Inner {
     }
 
     pub fn prog_page(&mut self, data: &Vec<u8>) -> Response {
+        debug!("Programmer::prog_page()");
         let mut command = vec![Commands::CmndStkProgPage as u8];
         let size = data.len() as u16;
         command.push( ((size>>8) & 0x00ff) as u8 );
@@ -351,8 +364,14 @@ impl Inner {
         command.extend(data);
         self.send_command(&command)
     }
+
+    pub fn leave_prog_mode(&mut self) -> Response {
+        debug!("Programmer::leave_prog_mode()");
+        self.send_command(&vec![Commands::CmndStkLeaveProgmode as u8])
+    }
 }
 
+#[derive(Debug)]
 pub enum StkError {
     ParseHexFileError,
 }
@@ -432,6 +451,8 @@ mod tests {
     extern crate simple_logger;
     use self::serialport::prelude::*;
     use super::Programmer;
+    use std::fs::File;
+    use std::io::Read;
     use std::thread;
     use std::sync::{Arc, Mutex};
     use std::time::Duration;
@@ -489,27 +510,21 @@ mod tests {
         });
 
         rx.wait().unwrap();
-        
-        let f = {
-            programmer.lock().unwrap().get_sync()
-        };
-        if let Ok(bytes) = f.wait() {
-            println!("Got response from get_sync()... {} bytes", bytes.len());
-        }
 
-        let f = {
-            programmer.lock().unwrap().sign_on()
-        };
-        if let Ok(bytes) = f.wait() {
-            println!("Got response from sign_on()... {} bytes", bytes.len());
-        }
+        let mut f = File::open("/share/linkbot-firmware/v4.6.1-dev.hex").expect("Firmware file not found.");
 
-        let f = {
-            programmer.lock().unwrap().read_sign()
-        };
-        if let Ok(bytes) = f.wait() {
-            println!("Got response from read_sign()... {} bytes", bytes.len());
-        }
+        let mut contents = String::new();
 
+        f.read_to_string(&mut contents).expect("Error reading firmware file.");
+
+        let buf = super::hex_to_buffer(&contents).unwrap();
+
+        let fut = {
+            programmer.lock().unwrap().prog_flash(0x0100, 2, buf)
+        };
+
+        if let Ok(_) = fut.wait() {
+            println!("Success.");
+        }
     }
 }
