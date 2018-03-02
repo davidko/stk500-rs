@@ -1,4 +1,5 @@
 extern crate futures;
+extern crate futures_timer;
 #[macro_use] extern crate log;
 
 use futures::Future;
@@ -6,6 +7,7 @@ use futures::future::{loop_fn, Loop};
 use futures::sync::oneshot;
 
 use std::sync::{Arc, Mutex};
+use std::time::Duration;
 
 pub type Response = Box<Future<Item=Vec<u8>, Error=oneshot::Canceled>>;
 
@@ -209,9 +211,12 @@ impl Programmer {
                     end = index + page_size;
                     page = &data[index..end];
                 }
-                let mut inner = p6.lock().unwrap();
+                let p6 = p6.clone();
                 let p7 = p7.clone();
-                inner.load_address((index / word_size) as u16).and_then(move |_| {
+                futures_timer::Delay::new(Duration::from_millis(50)).map_err(|_|{oneshot::Canceled}).and_then( move |_| {
+                    let mut inner = p6.lock().unwrap();
+                    inner.load_address((index / word_size) as u16)
+                }).and_then(move |_| {
                     let mut inner = p7.lock().unwrap();
                     let ref page = _data[index..end];
                     inner.prog_page(&page.to_vec())
@@ -274,6 +279,8 @@ impl Inner {
         if byte != Commands::RespStkInsync as u8 {
             debug!("Buffer header byte incorrect. Resetting internal buffer...");
             self.buffer.clear();
+			let _maybe_sender = self.waiting_future.take();
+            self.state = State::Idle;
             return;
         }
         match self.state {
@@ -447,17 +454,15 @@ pub fn hex_to_buffer(hex_string: &String) -> Result<Vec<u8>, StkError> {
 
 #[cfg(test)]
 mod tests {
-    extern crate serialport;
+    extern crate simple_async_serial as sas;
     extern crate simple_logger;
-    use self::serialport::prelude::*;
+    use self::sas::prelude::*;
     use super::Programmer;
     use std::fs::File;
-    use std::io::Read;
+    use std::io::{Read, Write};
     use std::thread;
     use std::sync::{Arc, Mutex};
     use std::time::Duration;
-    use std::rc::Rc;
-    use std::cell::RefCell;
 
     use futures::Future;
     use futures::sync::oneshot;
@@ -470,7 +475,7 @@ mod tests {
         let (tx, rx) = oneshot::channel::<()>();
 
         thread::spawn(move || {
-            let s = serialport::SerialPortSettings {
+            let s = sas::SerialPortSettings {
                 baud_rate: BaudRate::Baud57600,
                 data_bits: DataBits::Eight,
                 flow_control: FlowControl::None,
@@ -478,9 +483,11 @@ mod tests {
                 stop_bits: StopBits::One,
                 timeout: Duration::from_millis(1),
             };
-            let mut _port_inner = serialport::open_with_settings("/dev/ttyACM0", &s).unwrap();
+
+            let mut _port = sas::open_with_settings("/dev/ttyACM0", &s).unwrap();
+
             let mut buffer = [0; 256];
-            let mut port = Arc::new(Mutex::new(_port_inner));
+            let mut port = Arc::new(Mutex::new(_port));
 
             // Set the write-callback
             {
@@ -511,7 +518,7 @@ mod tests {
 
         rx.wait().unwrap();
 
-        let mut f = File::open("/share/linkbot-firmware/v4.6.1-dev.hex").expect("Firmware file not found.");
+        let mut f = File::open("/share/linkbot-firmware/v4.6.1.hex").expect("Firmware file not found.");
 
         let mut contents = String::new();
 

@@ -5,8 +5,9 @@ authors = ["David Ko <david@barobo.com>"]
 
 [dependencies]
 futures = "*"
+futures-timer = "*"
 log = "*"
 
 [dev-dependencies]
-serialport = "*"
+simple-async-serial = { path = "/home/dko/Projects/rust/simple-async-serial" }
 simple_logger = "*"
