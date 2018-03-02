@@ -164,11 +164,11 @@ impl Programmer {
         self.inner.lock().unwrap().load_address(address)
     }
 
-    pub fn prog_page(&mut self, data: &Vec<u8>) -> Response {
-        self.inner.lock().unwrap().prog_page(data)
+    pub fn prog_page(&mut self, mem_type: char, data: &Vec<u8>) -> Response {
+        self.inner.lock().unwrap().prog_page(mem_type, data)
     }
 
-    pub fn prog_flash<'a>(&'a mut self, page_size: usize, word_size: usize, data: Vec<u8>) -> 
+    pub fn prog_memory(&mut self, mem_type: char, page_size: usize, word_size: usize, data: Vec<u8>) -> 
         Box< Future<Item=Vec<u8>, Error=oneshot::Canceled> >
     {
         let p = self.inner.clone();
@@ -208,7 +208,13 @@ impl Programmer {
                 let __data = data.clone();
                 while check_program(&page.to_vec()) == false {
                     index = end;
+                    if index > data.len() {
+                        break;
+                    }
                     end = index + page_size;
+                    if end >= data.len() {
+                        end = data.len();
+                    }
                     page = &data[index..end];
                 }
                 let p6 = p6.clone();
@@ -219,7 +225,7 @@ impl Programmer {
                 }).and_then(move |_| {
                     let mut inner = p7.lock().unwrap();
                     let ref page = _data[index..end];
-                    inner.prog_page(&page.to_vec())
+                    inner.prog_page(mem_type, &page.to_vec())
                 }).and_then(move |_| {
                     if end < __data.len() {
                         Ok(Loop::Continue(end))
@@ -292,6 +298,7 @@ impl Inner {
                     sender.send(self.buffer.split_off(0)).unwrap();
                 }
                 self.state = State::Idle;
+                self.buffer.clear();
             }
         }
     }
@@ -361,13 +368,13 @@ impl Inner {
         self.send_command(&command)
     }
 
-    pub fn prog_page(&mut self, data: &Vec<u8>) -> Response {
+    pub fn prog_page(&mut self, mem_type: char, data: &Vec<u8>) -> Response {
         debug!("Programmer::prog_page()");
         let mut command = vec![Commands::CmndStkProgPage as u8];
         let size = data.len() as u16;
         command.push( ((size>>8) & 0x00ff) as u8 );
         command.push( (size & 0x00ff) as u8 );
-        command.push( 'F' as u8 );
+        command.push( mem_type as u8 );
         command.extend(data);
         self.send_command(&command)
     }
@@ -519,18 +526,28 @@ mod tests {
         rx.wait().unwrap();
 
         let mut f = File::open("/share/linkbot-firmware/v4.6.1.hex").expect("Firmware file not found.");
+        let mut eeprom = File::open("/share/linkbot-firmware/v4.6.1.eeprom").expect("Firmware file not found.");
 
         let mut contents = String::new();
+        let mut eeprom_contents = String::new();
 
         f.read_to_string(&mut contents).expect("Error reading firmware file.");
+        eeprom.read_to_string(&mut eeprom_contents).expect("Error reading eeprom file.");
 
         let buf = super::hex_to_buffer(&contents).unwrap();
+        let eeprom_buf = super::hex_to_buffer(&eeprom_contents).unwrap();
 
+        let _programmer = programmer.clone();
         let fut = {
-            programmer.lock().unwrap().prog_flash(0x0100, 2, buf)
+            _programmer.lock().unwrap().prog_memory('F', 0x0100, 2, buf)
         };
+        let __programmer = programmer.clone();
+        let fut2 = fut.and_then(move |_| {
+            let mut p = __programmer.lock().unwrap();
+            p.prog_memory('E', 0x0100, 2, eeprom_buf)
+        });
 
-        if let Ok(_) = fut.wait() {
+        if let Ok(_) = fut2.wait() {
             println!("Success.");
         }
     }
