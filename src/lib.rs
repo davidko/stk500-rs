@@ -1,5 +1,7 @@
+extern crate bytes;
 extern crate futures;
 extern crate futures_timer;
+extern crate tokio_io;
 #[macro_use] extern crate log;
 
 use futures::Future;
@@ -9,9 +11,13 @@ use futures::sync::oneshot;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
+pub mod codec;
+pub use codec::{Stk500Codec};
+
 pub type Response = Box<Future<Item=Vec<u8>, Error=oneshot::Canceled>>;
 
-pub enum Commands {
+#[derive(Clone, Copy)]
+pub enum Command {
         RespStkOk = 0x10,
         RespStkFailed = 0x11,
         RespStkUnknown = 0x12,
@@ -276,13 +282,13 @@ impl Inner {
             return;
         }
         if let Some(byte) = self.buffer.last() {
-            if *byte != Commands::RespStkOk as u8 {
+            if *byte != Command::RespStkOk as u8 {
                 debug!("Sentinal byte not received. Waiting for more data...");
                 return;
             }
         }
         let byte = *self.buffer.first().unwrap();
-        if byte != Commands::RespStkInsync as u8 {
+        if byte != Command::RespStkInsync as u8 {
             debug!("Buffer header byte incorrect. Resetting internal buffer...");
             self.buffer.clear();
 			let _maybe_sender = self.waiting_future.take();
@@ -309,7 +315,7 @@ impl Inner {
         self.waiting_future = Some(tx);
         if let Some(ref cb) = self.write_cb {
             let mut _buf = buf.clone();
-            _buf.push(Commands::SyncCrcEop as u8);
+            _buf.push(Command::SyncCrcEop as u8);
             debug!("Programmer::send_command: {} bytes.", _buf.len());
             cb(_buf);
         }
@@ -318,17 +324,17 @@ impl Inner {
 
     pub fn get_sync(&mut self) -> Response {
         debug!("Programmer::sign_on()");
-        self.send_command(&vec![Commands::CmndStkGetSync as u8])
+        self.send_command(&vec![Command::CmndStkGetSync as u8])
     }
 
     pub fn sign_on(&mut self) -> Response {
         debug!("Programmer::sign_on()");
-        self.send_command(&vec![Commands::CmndStkGetSignOn as u8])
+        self.send_command(&vec![Command::CmndStkGetSignOn as u8])
     }
 
     pub fn read_sign(&mut self) -> Response {
         debug!("Programmer::read_sign()");
-        self.send_command(&vec![Commands::CmndStkReadSign as u8])
+        self.send_command(&vec![Command::CmndStkReadSign as u8])
     }
 
     pub fn set_device(&mut self, settings: &Option<Vec<u8>>) -> Response {
@@ -339,7 +345,7 @@ impl Inner {
                 0x03, 0xff, 0xff, 0xff, 0xff, 0x00, 0x80, 0x04, 0x00,
                 0x00, 0x00, 0x80, 0x00]
         };
-        let mut command = vec![Commands::CmndStkSetDevice as u8];
+        let mut command = vec![Command::CmndStkSetDevice as u8];
         command.extend(s);
         self.send_command(&command)
     }
@@ -350,19 +356,19 @@ impl Inner {
             Some(ref buf) => buf.clone(),
             None => vec![0x05, 0x04, 0xd7, 0xc2, 0x00]
         };
-        let mut command = vec![Commands::CmndStkSetDeviceExt as u8];
+        let mut command = vec![Command::CmndStkSetDeviceExt as u8];
         command.extend(s);
         self.send_command(&command)
     }
 
     pub fn enter_prog_mode(&mut self) -> Response {
         debug!("Programmer::enter_prog_mode()");
-        self.send_command(&vec![Commands::CmndStkEnterProgmode as u8])
+        self.send_command(&vec![Command::CmndStkEnterProgmode as u8])
     }
 
     pub fn load_address(&mut self, address: u16) -> Response {
         debug!("Programmer::load_address()");
-        let mut command = vec![Commands::CmndStkLoadAddress as u8];
+        let mut command = vec![Command::CmndStkLoadAddress as u8];
         command.push( (address & 0x00ff) as u8 );
         command.push( (address>>8 & 0x00ff) as u8 );
         self.send_command(&command)
@@ -370,7 +376,7 @@ impl Inner {
 
     pub fn prog_page(&mut self, mem_type: char, data: &Vec<u8>) -> Response {
         debug!("Programmer::prog_page()");
-        let mut command = vec![Commands::CmndStkProgPage as u8];
+        let mut command = vec![Command::CmndStkProgPage as u8];
         let size = data.len() as u16;
         command.push( ((size>>8) & 0x00ff) as u8 );
         command.push( (size & 0x00ff) as u8 );
@@ -381,7 +387,7 @@ impl Inner {
 
     pub fn leave_prog_mode(&mut self) -> Response {
         debug!("Programmer::leave_prog_mode()");
-        self.send_command(&vec![Commands::CmndStkLeaveProgmode as u8])
+        self.send_command(&vec![Command::CmndStkLeaveProgmode as u8])
     }
 }
 
