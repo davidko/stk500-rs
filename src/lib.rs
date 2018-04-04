@@ -2,6 +2,8 @@ extern crate bytes;
 extern crate futures;
 extern crate futures_timer;
 extern crate tokio_io;
+extern crate tokio_proto;
+extern crate tokio_service;
 #[macro_use] extern crate log;
 
 use futures::Future;

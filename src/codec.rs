@@ -1,11 +1,45 @@
 use bytes::{BufMut, BytesMut};
 use super::Command;
-use super::tokio_io;
+use super::tokio_io::{AsyncWrite, AsyncRead};
+use super::tokio_io::codec::{Encoder, Decoder, Framed};
 use std::io;
+use tokio_proto::pipeline::{ClientProto, ClientService};
+use tokio_service::{Service};
+use futures::{Future};
 
 pub struct Packet {
     command: Command,
     payload: Vec<u8>,
+}
+
+pub struct Client<T> where T: AsyncRead + AsyncWrite + 'static
+{
+    inner: ClientService<T, Stk500Proto>,
+}
+
+impl<T> Client<T> 
+    where T: AsyncRead + AsyncWrite + 'static
+{
+    pub fn get_sync(&self) -> Box<Future<Item = (), Error = io::Error>> {
+        Box::new(self.call(get_sync())
+            .and_then(|_| {
+                Ok(())
+            })
+        )
+    }
+}
+
+impl<T> Service for Client<T> 
+    where T: AsyncRead + AsyncWrite + 'static
+{
+    type Request = Packet;
+    type Response = BytesMut;
+    type Error = io::Error;
+    type Future = Box<Future<Item = BytesMut, Error = io::Error>>;
+
+    fn call(&self, req: Packet) -> Self::Future {
+        Box::new(self.inner.call(req))
+    }
 }
 
 pub struct Stk500Codec {
@@ -13,7 +47,13 @@ pub struct Stk500Codec {
     expected_response_len: usize
 }
 
-impl tokio_io::codec::Encoder for Stk500Codec {
+impl Stk500Codec {
+    fn new() -> Stk500Codec {
+        Stk500Codec{last_command: Command::CmndStkGetSync, expected_response_len: 0}
+    }
+}
+
+impl Encoder for Stk500Codec {
     type Item = Packet;
     type Error = io::Error;
 
@@ -55,7 +95,7 @@ fn expected_response_len(packet: &Packet) -> usize {
     }
 }
 
-impl tokio_io::codec::Decoder for Stk500Codec {
+impl Decoder for Stk500Codec {
     type Item = BytesMut;
     type Error = io::Error;
 
@@ -80,3 +120,44 @@ impl tokio_io::codec::Decoder for Stk500Codec {
         
     }
 }
+
+struct Stk500Proto;
+
+impl<T: AsyncRead + AsyncWrite + 'static> ClientProto<T> for Stk500Proto {
+    type Request = Packet;
+    type Response = BytesMut;
+    type Transport = Framed<T, Stk500Codec>;
+    type BindTransport = Result<Self::Transport, io::Error>;
+
+    fn bind_transport(&self, io: T) -> Self::BindTransport {
+        Ok(io.framed(Stk500Codec::new()))
+    }
+}
+
+fn get_sync() -> Packet {
+    Packet{command: Command::CmndStkGetSync, payload: vec![]}
+}
+
+fn set_device(payload: &Option<Vec<u8>>) -> Packet {
+    let s = match *payload{
+        Some(ref buf) => buf.clone(),
+        None => vec![0x86, 0x00, 0x00, 0x01, 0x01, 0x01, 0x01,
+        0x03, 0xff, 0xff, 0xff, 0xff, 0x00, 0x80, 0x04, 0x00,
+        0x00, 0x00, 0x80, 0x00]
+    };
+    Packet{command: Command::CmndStkSetDevice, payload: s}
+}
+
+fn set_device_ext(payload: &Option<Vec<u8>>) -> Packet {
+    let s = match *payload{
+        Some(ref buf) => buf.clone(),
+        None => vec![0x05, 0x04, 0xd7, 0xc2, 0x00]
+    };
+    Packet{command: Command::CmndStkSetDeviceExt, payload: s}
+}
+
+/*
+pub fn enter_prog_mode() -> Packet {
+    Packet{ command: Command::CmndStkEnterProgMode, payload: vec![] }
+}
+*/
