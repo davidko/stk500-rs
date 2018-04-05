@@ -1,35 +1,37 @@
 use bytes::{BufMut, BytesMut};
+use futures::future::{Executor, Future};
 use super::Command;
 use super::tokio_io::{AsyncWrite, AsyncRead};
 use super::tokio_io::codec::{Encoder, Decoder, Framed};
 use std::io;
+use std::sync::{Arc};
+use tokio_core::reactor::{Handle};
 use tokio_proto::pipeline::{ClientProto, ClientService};
+use tokio_proto::{BindClient};
 use tokio_service::{Service};
-use futures::{Future};
 
 pub struct Packet {
     command: Command,
     payload: Vec<u8>,
 }
 
-pub struct Client<T> where T: AsyncRead + AsyncWrite + 'static
+pub struct Client<T>
+    where T: AsyncRead + AsyncWrite + 'static
 {
     inner: ClientService<T, Stk500Proto>,
 }
 
-impl<T> Client<T> 
+impl<T> Client<T>
     where T: AsyncRead + AsyncWrite + 'static
 {
-    pub fn get_sync(&self) -> Box<Future<Item = (), Error = io::Error>> {
-        Box::new(self.call(get_sync())
-            .and_then(|_| {
-                Ok(())
-            })
-        )
+    fn new(&self, handle: &Handle, io_transport: T) -> Client<T>
+    {
+        let proto = Stk500Proto;
+        Client{ inner: proto.bind_client(handle, io_transport) }
     }
 }
 
-impl<T> Service for Client<T> 
+impl<T> Service for Client<T>
     where T: AsyncRead + AsyncWrite + 'static
 {
     type Request = Packet;
