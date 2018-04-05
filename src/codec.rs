@@ -1,14 +1,15 @@
 use bytes::{BufMut, BytesMut};
-use futures::future::{Executor, Future};
+use futures::future::{Future};
 use super::Command;
 use super::tokio_io::{AsyncWrite, AsyncRead};
 use super::tokio_io::codec::{Encoder, Decoder, Framed};
 use std::io;
-use std::sync::{Arc};
 use tokio_core::reactor::{Handle};
 use tokio_proto::pipeline::{ClientProto, ClientService};
 use tokio_proto::{BindClient};
 use tokio_service::{Service};
+
+pub type ResponseFuture = Box<Future<Item = BytesMut, Error = io::Error>>;
 
 pub struct Packet {
     command: Command,
@@ -24,10 +25,64 @@ pub struct Client<T>
 impl<T> Client<T>
     where T: AsyncRead + AsyncWrite + 'static
 {
-    fn new(&self, handle: &Handle, io_transport: T) -> Client<T>
-    {
+    pub fn new(&self, handle: &Handle, io_transport: T) -> Client<T> {
         let proto = Stk500Proto;
         Client{ inner: proto.bind_client(handle, io_transport) }
+    }
+
+    pub fn get_sync(&self) -> ResponseFuture {
+        let packet = Packet { command: Command::CmndStkGetSync, payload: vec![] };
+        self.call(packet)
+    }
+
+    pub fn set_device(&self, payload: &Option<Vec<u8>>) -> ResponseFuture {
+        let p = match *payload{
+            Some(ref buf) => buf.clone(),
+            None => vec![0x86, 0x00, 0x00, 0x01, 0x01, 0x01, 0x01,
+            0x03, 0xff, 0xff, 0xff, 0xff, 0x00, 0x80, 0x04, 0x00,
+            0x00, 0x00, 0x80, 0x00]
+        };
+        let packet = Packet{command: Command::CmndStkSetDevice, payload: p};
+        self.call(packet)
+    }
+
+    pub fn set_device_ext(&self, payload: &Option<Vec<u8>>) -> ResponseFuture {
+        let p = match *payload{
+            Some(ref buf) => buf.clone(),
+            None => vec![0x05, 0x04, 0xd7, 0xc2, 0x00]
+        };
+        let packet = Packet{command: Command::CmndStkSetDeviceExt, payload: p};
+        self.call(packet)
+    }
+
+    pub fn enter_prog_mode(&self) -> ResponseFuture {
+        self.call(
+            Packet{ command: Command::CmndStkEnterProgmode, payload: vec![] }
+        )
+    }
+
+    pub fn read_sign(&self) -> ResponseFuture {
+        self.call(
+            Packet{ command: Command::CmndStkReadSign, payload: vec![] }
+        )
+    }
+
+    pub fn load_address(&self, address: u16) -> ResponseFuture {
+        self.call(
+            Packet{ 
+                command: Command::CmndStkLoadAddress,
+                payload: vec![ 
+                    (address & 0x00ff) as u8,
+                    (address>>8 & 0x00ff) as u8 ]
+            }
+        )
+    }
+
+    pub fn prog_page(&self, mem_type: char, data: &Vec<u8>) -> ResponseFuture {
+        let size = data.len() as u16;
+        let mut payload = vec![ (size>>8) as u8, (size&0x00ff) as u8, mem_type as u8];
+        payload.extend(data);
+        self.call( Packet{ command: Command::CmndStkProgPage, payload: payload } )
     }
 }
 
@@ -37,7 +92,7 @@ impl<T> Service for Client<T>
     type Request = Packet;
     type Response = BytesMut;
     type Error = io::Error;
-    type Future = Box<Future<Item = BytesMut, Error = io::Error>>;
+    type Future = ResponseFuture;
 
     fn call(&self, req: Packet) -> Self::Future {
         Box::new(self.inner.call(req))
@@ -136,27 +191,6 @@ impl<T: AsyncRead + AsyncWrite + 'static> ClientProto<T> for Stk500Proto {
     }
 }
 
-fn get_sync() -> Packet {
-    Packet{command: Command::CmndStkGetSync, payload: vec![]}
-}
-
-fn set_device(payload: &Option<Vec<u8>>) -> Packet {
-    let s = match *payload{
-        Some(ref buf) => buf.clone(),
-        None => vec![0x86, 0x00, 0x00, 0x01, 0x01, 0x01, 0x01,
-        0x03, 0xff, 0xff, 0xff, 0xff, 0x00, 0x80, 0x04, 0x00,
-        0x00, 0x00, 0x80, 0x00]
-    };
-    Packet{command: Command::CmndStkSetDevice, payload: s}
-}
-
-fn set_device_ext(payload: &Option<Vec<u8>>) -> Packet {
-    let s = match *payload{
-        Some(ref buf) => buf.clone(),
-        None => vec![0x05, 0x04, 0xd7, 0xc2, 0x00]
-    };
-    Packet{command: Command::CmndStkSetDeviceExt, payload: s}
-}
 
 /*
 pub fn enter_prog_mode() -> Packet {

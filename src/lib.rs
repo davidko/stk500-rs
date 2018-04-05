@@ -482,6 +482,11 @@ mod tests {
 
     use futures::Future;
     use futures::sync::oneshot;
+
+    #[test]
+    fn async_test() {
+    }
+
     #[test]
     fn it_works() {
         simple_logger::init().unwrap();
