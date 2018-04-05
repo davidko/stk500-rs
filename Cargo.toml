@@ -14,4 +14,5 @@ tokio-proto = "0.1.1"
 tokio-service = "*"
 
 [dev-dependencies]
+tokio-serial = "*"
 simple_logger = "*"

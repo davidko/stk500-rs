@@ -15,7 +15,7 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 pub mod codec;
-pub use codec::{Stk500Codec};
+pub use codec::{Stk500Codec, Client};
 
 pub type Response = Box<Future<Item=Vec<u8>, Error=oneshot::Canceled>>;
 
@@ -470,74 +470,17 @@ pub fn hex_to_buffer(hex_string: &String) -> Result<Vec<u8>, StkError> {
 
 #[cfg(test)]
 mod tests {
-    extern crate simple_async_serial as sas;
-    extern crate simple_logger;
-    use self::sas::prelude::*;
-    use super::Programmer;
-    use std::fs::File;
-    use std::io::{Read, Write};
-    use std::thread;
-    use std::sync::{Arc, Mutex};
-    use std::time::Duration;
-
     use futures::Future;
-    use futures::sync::oneshot;
+    use super::Client;
+    use std::fs::File;
+    use std::io::{Read};
 
     #[test]
     fn async_test() {
-    }
+        extern crate tokio_serial;
+        extern crate tokio_core;
 
-    #[test]
-    fn it_works() {
-        simple_logger::init().unwrap();
-        let programmer = Arc::new(Mutex::new(Programmer::new()));
-        let _programmer = programmer.clone();
-
-        let (tx, rx) = oneshot::channel::<()>();
-
-        thread::spawn(move || {
-            let s = sas::SerialPortSettings {
-                baud_rate: BaudRate::Baud57600,
-                data_bits: DataBits::Eight,
-                flow_control: FlowControl::None,
-                parity: Parity::None,
-                stop_bits: StopBits::One,
-                timeout: Duration::from_millis(1),
-            };
-
-            let mut _port = sas::open_with_settings("/dev/ttyACM0", &s).unwrap();
-
-            let mut buffer = [0; 256];
-            let mut port = Arc::new(Mutex::new(_port));
-
-            // Set the write-callback
-            {
-                let mut p = _programmer.lock().unwrap();
-                let _port = port.clone();
-                p.set_write_cb(move |bytes| {
-                    debug!("Sending bytes to underlying serial port...");
-                    _port.lock().unwrap().write(bytes.as_slice());
-                    debug!("Sending bytes to underlying serial port...done");
-                });
-            }
-
-            tx.send(());
-
-            loop {
-                let maybe_len = {
-                    port.lock().unwrap().read(&mut buffer)
-                };
-                if let Ok(len) = maybe_len {
-                    debug!("Received {} bytes from serial port. Delivering...", len);
-                    _programmer.lock().unwrap().deliver( buffer[0..len].to_vec() );
-                    debug!("Received {} bytes from serial port. Delivering...done", len);
-                } else {
-                    thread::sleep( Duration::from_millis(1) );
-                }
-            }
-        });
-
-        rx.wait().unwrap();
+        let mut core = tokio_core::reactor::Core::new().unwrap();
 
         let mut f = File::open("/share/linkbot-firmware/v4.6.1.hex").expect("Firmware file not found.");
         let mut eeprom = File::open("/share/linkbot-firmware/v4.6.1.eeprom").expect("Firmware file not found.");
@@ -550,19 +493,16 @@ mod tests {
 
         let buf = super::hex_to_buffer(&contents).unwrap();
         let eeprom_buf = super::hex_to_buffer(&eeprom_contents).unwrap();
-
-        let _programmer = programmer.clone();
-        let fut = {
-            _programmer.lock().unwrap().prog_memory('F', 0x0100, 2, buf)
-        };
-        let __programmer = programmer.clone();
-        let fut2 = fut.and_then(move |_| {
-            let mut p = __programmer.lock().unwrap();
-            p.prog_memory('E', 0x0100, 2, eeprom_buf)
-        });
-
-        if let Ok(_) = fut2.wait() {
-            println!("Success.");
-        }
+       
+        let mut settings = tokio_serial::SerialPortSettings::default();
+        settings.baud_rate = tokio_serial::BaudRate::Baud57600;
+        let handle = core.handle();
+        let port = tokio_serial::Serial::from_path("/dev/ttyACM0", &settings, &handle).unwrap();
+        let client = Client::new(&handle, port);
+        let task = client.prog_memory('F', 0x0100, 2, buf)
+            .and_then(|_| {
+                client.prog_memory('E', 0x0100, 2, eeprom_buf)
+            });
+        core.run(task).unwrap();
     }
 }

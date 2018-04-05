@@ -1,4 +1,4 @@
-use bytes::{BufMut, BytesMut};
+use bytes::{BytesMut};
 use futures::future::{Future, loop_fn, Loop};
 use futures_timer;
 use super::Command;
@@ -28,7 +28,7 @@ pub struct Client<T>
 impl<T> Client<T>
     where T: AsyncRead + AsyncWrite + 'static
 {
-    pub fn new(&self, handle: &Handle, io_transport: T) -> Client<T> {
+    pub fn new(handle: &Handle, io_transport: T) -> Client<T> {
         Client{ 
             inner: Arc::new( Inner::new(handle, io_transport) )
         }
@@ -259,9 +259,9 @@ impl Encoder for Stk500Codec {
     ) -> Result<(), Self::Error> {
         self.last_command = item.command;
         self.expected_response_len = expected_response_len(&item);
-        dst.put_u8(item.command as u8);
-        dst.put(item.payload);
-        dst.put(Command::SyncCrcEop as u8);
+        dst.extend([item.command as u8].iter());
+        dst.extend_from_slice(&item.payload.as_slice());
+        dst.extend([Command::SyncCrcEop as u8].iter());
         Ok(())
     }
 }
@@ -298,14 +298,17 @@ impl Decoder for Stk500Codec {
         &mut self,
         src: &mut BytesMut,
     ) -> Result<Option<Self::Item>, Self::Error> {
-        if src[0] != Command::RespStkInsync as u8 {
+
+        if src.len() < self.expected_response_len {
+            Ok(None)
+        } 
+        else if src[0] != Command::RespStkInsync as u8 {
             Err(io::Error::new(io::ErrorKind::Other, "Stk500 Response Error: Expected first byte to be RespStkInsync"))
         }
-        else if src.len() < self.expected_response_len {
-            Ok(None)
-        } else if src[self.expected_response_len-1] != Command::RespStkOk as u8 {
+        else if src[self.expected_response_len-1] != Command::RespStkOk as u8 {
             Err(io::Error::new(io::ErrorKind::Other, "Stk500 Response Error: Expected last byte to be RespStkOk"))
-        } else {
+        } 
+        else {
             let mut resp = src.split_to(self.expected_response_len);
             resp.split_to(1); // Get rid of the first byte
             let len = resp.len();
