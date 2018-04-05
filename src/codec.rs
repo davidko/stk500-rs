@@ -1,9 +1,12 @@
 use bytes::{BufMut, BytesMut};
-use futures::future::{Future};
+use futures::future::{Future, loop_fn, Loop};
+use futures_timer;
 use super::Command;
 use super::tokio_io::{AsyncWrite, AsyncRead};
 use super::tokio_io::codec::{Encoder, Decoder, Framed};
 use std::io;
+use std::sync::{Arc};
+use std::time::Duration;
 use tokio_core::reactor::{Handle};
 use tokio_proto::pipeline::{ClientProto, ClientService};
 use tokio_proto::{BindClient};
@@ -19,23 +22,154 @@ pub struct Packet {
 pub struct Client<T>
     where T: AsyncRead + AsyncWrite + 'static
 {
-    inner: ClientService<T, Stk500Proto>,
+    inner: Arc<Inner<T>>
 }
 
 impl<T> Client<T>
     where T: AsyncRead + AsyncWrite + 'static
 {
     pub fn new(&self, handle: &Handle, io_transport: T) -> Client<T> {
-        let proto = Stk500Proto;
-        Client{ inner: proto.bind_client(handle, io_transport) }
+        Client{ 
+            inner: Arc::new( Inner::new(handle, io_transport) )
+        }
+    }
+    
+    pub fn get_sync(&self) -> ResponseFuture {
+        self.inner.get_sync()
     }
 
-    pub fn get_sync(&self) -> ResponseFuture {
+    pub fn set_device(&self, payload: &Option<Vec<u8>>) -> ResponseFuture {
+        self.inner.set_device(payload)
+    }
+
+    pub fn set_device_ext(&self, payload: &Option<Vec<u8>>) -> ResponseFuture {
+        self.inner.set_device_ext(payload)
+    }
+
+    pub fn enter_prog_mode(&self) -> ResponseFuture {
+        self.inner.enter_prog_mode()
+    }
+
+    pub fn read_sign(&self) -> ResponseFuture {
+        self.inner.read_sign()
+    }
+
+    pub fn load_address(&self, address: u16) -> ResponseFuture {
+        self.inner.load_address(address)
+    }
+
+    pub fn prog_page(&self, mem_type: char, data: &Vec<u8>) -> ResponseFuture {
+        self.inner.prog_page(mem_type, data)
+    }
+
+    pub fn prog_memory(&self, mem_type: char, page_size: usize, word_size: usize, data: Vec<u8>)
+        -> ResponseFuture
+    {
+        let step0 = self.get_sync();
+
+        let inner = self.inner.clone();
+        let step1 = move |_| {
+            inner.set_device(&None)
+        };
+
+        let inner = self.inner.clone();
+        let step2 = move |_| {
+            inner.set_device_ext(&None)
+        };
+
+        let inner = self.inner.clone();
+        let step3 = move |_| {
+            inner.enter_prog_mode()
+        };
+       
+        let inner = self.inner.clone();
+        let step4 = move |_| {
+            inner.read_sign()
+        };
+
+        let inner = self.inner.clone();
+        let step5 = move |_| {
+            fn check_program(buf: &Vec<u8>) -> bool {
+                buf.iter().any(|&x| {
+                    x != 0xff
+                })
+            }
+            
+            loop_fn(0 as usize, move |mut index| {
+                let mut end = index + page_size;
+                if end >= data.len() {
+                    end = data.len();
+                }
+                let mut page = &data[index..end];
+                let _data = data.clone();
+                let __data = data.clone();
+                while check_program(&page.to_vec()) == false {
+                    index = end;
+                    if index > data.len() {
+                        break;
+                    }
+                    end = index + page_size;
+                    if end >= data.len() {
+                        end = data.len();
+                    }
+                    page = &data[index..end];
+                }
+                let _inner = inner.clone();
+                let __inner = inner.clone();
+                futures_timer::Delay::new(Duration::from_millis(50))
+                    .map_err(|_|{io::Error::new(io::ErrorKind::Other, "Timeout")})
+                    .and_then( move |_| {
+                    _inner.load_address((index / word_size) as u16)
+                }).and_then(move |_| {
+                    let ref page = _data[index..end];
+                    __inner.prog_page(mem_type, &page.to_vec())
+                }).and_then(move |_| {
+                    if end < __data.len() {
+                        Ok(Loop::Continue(end))
+                    } else {
+                        Ok(Loop::Break(end))
+                    }
+                })
+            })
+        };
+
+        let inner = self.inner.clone();
+        let step6 = move |_| {
+            inner.leave_prog_mode()
+        };
+
+        let f = step0
+            .and_then( step1 )
+            .and_then( step2 )
+            .and_then( step3 )
+            .and_then( step4 )
+            .and_then( step5 )
+            .and_then( step6 );
+
+        Box::new(f)
+    }
+}
+
+struct Inner<T>
+    where T: AsyncRead + AsyncWrite + 'static
+{
+    inner: ClientService<T, Stk500Proto>,
+}
+
+impl<T> Inner<T>
+    where T: AsyncRead + AsyncWrite + 'static
+{
+    fn new(handle: &Handle, io_transport: T) -> Inner<T> {
+        let proto = Stk500Proto;
+        Inner{ inner: proto.bind_client(handle, io_transport) }
+    }
+
+    fn get_sync(&self) -> ResponseFuture {
         let packet = Packet { command: Command::CmndStkGetSync, payload: vec![] };
         self.call(packet)
     }
 
-    pub fn set_device(&self, payload: &Option<Vec<u8>>) -> ResponseFuture {
+    fn set_device(&self, payload: &Option<Vec<u8>>) -> ResponseFuture {
         let p = match *payload{
             Some(ref buf) => buf.clone(),
             None => vec![0x86, 0x00, 0x00, 0x01, 0x01, 0x01, 0x01,
@@ -46,7 +180,7 @@ impl<T> Client<T>
         self.call(packet)
     }
 
-    pub fn set_device_ext(&self, payload: &Option<Vec<u8>>) -> ResponseFuture {
+    fn set_device_ext(&self, payload: &Option<Vec<u8>>) -> ResponseFuture {
         let p = match *payload{
             Some(ref buf) => buf.clone(),
             None => vec![0x05, 0x04, 0xd7, 0xc2, 0x00]
@@ -55,19 +189,19 @@ impl<T> Client<T>
         self.call(packet)
     }
 
-    pub fn enter_prog_mode(&self) -> ResponseFuture {
+    fn enter_prog_mode(&self) -> ResponseFuture {
         self.call(
             Packet{ command: Command::CmndStkEnterProgmode, payload: vec![] }
         )
     }
 
-    pub fn read_sign(&self) -> ResponseFuture {
+    fn read_sign(&self) -> ResponseFuture {
         self.call(
             Packet{ command: Command::CmndStkReadSign, payload: vec![] }
         )
     }
 
-    pub fn load_address(&self, address: u16) -> ResponseFuture {
+    fn load_address(&self, address: u16) -> ResponseFuture {
         self.call(
             Packet{ 
                 command: Command::CmndStkLoadAddress,
@@ -78,15 +212,19 @@ impl<T> Client<T>
         )
     }
 
-    pub fn prog_page(&self, mem_type: char, data: &Vec<u8>) -> ResponseFuture {
+    fn prog_page(&self, mem_type: char, data: &Vec<u8>) -> ResponseFuture {
         let size = data.len() as u16;
         let mut payload = vec![ (size>>8) as u8, (size&0x00ff) as u8, mem_type as u8];
         payload.extend(data);
         self.call( Packet{ command: Command::CmndStkProgPage, payload: payload } )
     }
+
+    fn leave_prog_mode(&self) -> ResponseFuture {
+        self.call( Packet{ command: Command::CmndStkLeaveProgmode, payload: vec![] } )
+    }
 }
 
-impl<T> Service for Client<T>
+impl<T> Service for Inner<T>
     where T: AsyncRead + AsyncWrite + 'static
 {
     type Request = Packet;
