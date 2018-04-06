@@ -162,7 +162,7 @@ impl<T> Client<T>
 struct Inner<T>
     where T: AsyncRead + AsyncWrite + 'static
 {
-    inner: ClientService<T, Stk500Proto>,
+    inner: Timeout<ClientService<T, Stk500Proto>>,
 }
 
 impl<T> Inner<T>
@@ -170,7 +170,12 @@ impl<T> Inner<T>
 {
     fn new(handle: &Handle, io_transport: T) -> Inner<T> {
         let proto = Stk500Proto;
-        Inner{ inner: proto.bind_client(handle, io_transport) }
+        let inner_service = proto.bind_client(handle, io_transport);
+        let service = Timeout::new(
+            inner_service,
+            Duration::from_millis(500),
+            handle);
+        Inner{ inner: service }
     }
 
     fn get_sync(&self) -> ResponseFuture {
