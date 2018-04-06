@@ -1,5 +1,5 @@
 use bytes::{BytesMut};
-use futures::future::{Future, loop_fn, Loop};
+use futures::future::{Either, Future, loop_fn, Loop};
 use futures_timer;
 use super::Command;
 use super::tokio_io::{AsyncWrite, AsyncRead};
@@ -7,6 +7,7 @@ use super::tokio_io::codec::{Encoder, Decoder, Framed};
 use std::io;
 use std::sync::{Arc};
 use std::time::Duration;
+use tokio_core;
 use tokio_core::reactor::{Handle};
 use tokio_proto::pipeline::{ClientProto, ClientService};
 use tokio_proto::{BindClient};
@@ -23,6 +24,14 @@ pub struct Client<T>
     where T: AsyncRead + AsyncWrite + 'static
 {
     inner: Arc<Inner<T>>
+}
+
+impl<T> Clone for Client<T>
+    where T: AsyncRead + AsyncWrite + 'static
+{
+    fn clone(&self) -> Client<T> {
+        Client{ inner: self.inner.clone() }
+    }
 }
 
 impl<T> Client<T>
@@ -338,3 +347,85 @@ pub fn enter_prog_mode() -> Packet {
     Packet{ command: Command::CmndStkEnterProgMode, payload: vec![] }
 }
 */
+
+struct Timeout<T> {
+    delay: Duration,
+    upstream: T,
+    handle: Handle,
+}
+
+impl<T> Timeout<T> {
+    fn new(upstream: T, delay: Duration, handle: &Handle) -> Timeout<T> {
+        Timeout{
+            delay: delay,
+            upstream: upstream,
+            handle: handle.clone()
+        }
+    }
+}
+
+impl<T> Service for Timeout<T> 
+    where T: Service,
+          T::Error: From<io::Error> + 'static,
+          T::Request: 'static,
+          T::Response: 'static,
+          T::Future: 'static,
+{
+    type Request = T::Request;
+    type Response = T::Response;
+    type Error = T::Error;
+    type Future = Box<Future<Item = Self::Response, Error = Self::Error>>;
+
+    fn call(&self, req: Self::Request) -> Self::Future {
+        let timeout = tokio_core::reactor::Timeout::new(self.delay, &self.handle).unwrap();
+
+        let work = self.upstream.call(req).select2(timeout).then(|res| {
+            match res {
+                Ok(Either::A((item, _timeout))) => Ok(item),
+                Ok(Either::B((_timeout_error, _item))) => {
+                    Err(Self::Error::from(io::Error::new( io::ErrorKind::Other, "Timeout.")))
+                }
+                Err(Either::A((item_error, _timeout))) => {
+                    Err(item_error)
+                }
+                Err(Either::B((timeout_error, _item))) => Err(Self::Error::from(timeout_error))
+            }
+        });
+
+        Box::new(work)
+
+            /*
+            .map_err(|e| {
+                Self::Error::from(e)
+            })
+            .and_then(|_| {
+                Err(Self::Error::from(io::Error::new( io::ErrorKind::Other, "Timeout.")))
+            });
+
+
+        let f = timeout.select2( self.upstream.call(req) )
+            .map_err(|e| {
+                match e {
+                    Either::A((e, _fut)) => e,
+                    Either::B((e, _fut)) => e
+                }
+            });
+            .map(|res| {
+                match res {
+                    Either::B((item, _timer_fut)) => item,
+                    _ => unimplemented!(),
+                }
+            });
+            
+        //f.aoeue();
+        //
+        let f2 = f.map(|res| {
+            match res {
+                Either::B((item, _)) => item,
+                Either::A((_, _)) => unimplemented!(),
+            }
+        });
+        Box::new(f2)
+        */
+    }
+}

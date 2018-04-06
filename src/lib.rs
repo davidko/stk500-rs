@@ -481,28 +481,35 @@ mod tests {
         extern crate tokio_core;
 
         let mut core = tokio_core::reactor::Core::new().unwrap();
-
-        let mut f = File::open("/share/linkbot-firmware/v4.6.1.hex").expect("Firmware file not found.");
-        let mut eeprom = File::open("/share/linkbot-firmware/v4.6.1.eeprom").expect("Firmware file not found.");
-
-        let mut contents = String::new();
-        let mut eeprom_contents = String::new();
-
-        f.read_to_string(&mut contents).expect("Error reading firmware file.");
-        eeprom.read_to_string(&mut eeprom_contents).expect("Error reading eeprom file.");
-
-        let buf = super::hex_to_buffer(&contents).unwrap();
-        let eeprom_buf = super::hex_to_buffer(&eeprom_contents).unwrap();
-       
-        let mut settings = tokio_serial::SerialPortSettings::default();
-        settings.baud_rate = tokio_serial::BaudRate::Baud57600;
         let handle = core.handle();
+        {
+            let mut f = File::open("/share/linkbot-firmware/v4.6.1.hex").expect("Firmware file not found.");
+            let mut eeprom = File::open("/share/linkbot-firmware/v4.6.1.eeprom").expect("Firmware file not found.");
+
+            let mut contents = String::new();
+            let mut eeprom_contents = String::new();
+
+            f.read_to_string(&mut contents).expect("Error reading firmware file.");
+            eeprom.read_to_string(&mut eeprom_contents).expect("Error reading eeprom file.");
+
+            let buf = super::hex_to_buffer(&contents).unwrap();
+            let eeprom_buf = super::hex_to_buffer(&eeprom_contents).unwrap();
+           
+            let mut settings = tokio_serial::SerialPortSettings::default();
+            settings.baud_rate = tokio_serial::BaudRate::Baud57600;
+            let mut port = tokio_serial::Serial::from_path("/dev/ttyACM0", &settings, &handle).unwrap();
+            port.set_exclusive(false).unwrap();
+            let client = Client::new(&handle, port);
+            let _client = client.clone();
+            let task = client.prog_memory('F', 0x0100, 2, buf)
+                .and_then(move |_| {
+                    _client.prog_memory('E', 0x0100, 2, eeprom_buf)
+                });
+            core.run(task).unwrap();
+        }
+        // Let everything fall out of scope and see if I can open the serial port again.
+        let mut settings = tokio_serial::SerialPortSettings::default();
+        settings.baud_rate = tokio_serial::BaudRate::Baud115200;
         let port = tokio_serial::Serial::from_path("/dev/ttyACM0", &settings, &handle).unwrap();
-        let client = Client::new(&handle, port);
-        let task = client.prog_memory('F', 0x0100, 2, buf)
-            .and_then(|_| {
-                client.prog_memory('E', 0x0100, 2, eeprom_buf)
-            });
-        core.run(task).unwrap();
     }
 }
