@@ -5,7 +5,7 @@ authors = ["David Ko <david@barobo.com>"]
 
 [dependencies]
 bytes = "*"
-futures = "*"
+futures = "0.1.21"
 futures-timer = "*"
 log = "*"
 tokio-core = "*"

@@ -20,6 +20,7 @@ pub struct Packet {
     payload: Vec<u8>,
 }
 
+/// An Stk500 Client Service
 pub struct Client<T>
     where T: AsyncRead + AsyncWrite + 'static
 {
@@ -44,10 +45,12 @@ impl<T> Client<T>
     }
     
     pub fn get_sync(&self) -> ResponseFuture {
+        debug!("get_sync()");
         self.inner.get_sync()
     }
 
     pub fn set_device(&self, payload: &Option<Vec<u8>>) -> ResponseFuture {
+        debug!("set_device()");
         self.inner.set_device(payload)
     }
 
@@ -399,38 +402,5 @@ impl<T> Service for Timeout<T>
 
         Box::new(work)
 
-            /*
-            .map_err(|e| {
-                Self::Error::from(e)
-            })
-            .and_then(|_| {
-                Err(Self::Error::from(io::Error::new( io::ErrorKind::Other, "Timeout.")))
-            });
-
-
-        let f = timeout.select2( self.upstream.call(req) )
-            .map_err(|e| {
-                match e {
-                    Either::A((e, _fut)) => e,
-                    Either::B((e, _fut)) => e
-                }
-            });
-            .map(|res| {
-                match res {
-                    Either::B((item, _timer_fut)) => item,
-                    _ => unimplemented!(),
-                }
-            });
-            
-        //f.aoeue();
-        //
-        let f2 = f.map(|res| {
-            match res {
-                Either::B((item, _)) => item,
-                Either::A((_, _)) => unimplemented!(),
-            }
-        });
-        Box::new(f2)
-        */
     }
 }
