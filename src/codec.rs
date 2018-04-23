@@ -261,7 +261,7 @@ pub struct Stk500Codec {
 
 impl Stk500Codec {
     fn new() -> Stk500Codec {
-        Stk500Codec{last_command: Command::CmndStkGetSync, expected_response_len: 0}
+        Stk500Codec{last_command: Command::CmndStkGetSync, expected_response_len: 2}
     }
 }
 
